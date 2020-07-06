@@ -1,3 +1,9 @@
+# Code for Plain Self-Ensembles
+
+Video: [https://youtu.be/z_3Qv4In2ac](https://youtu.be/z_3Qv4In2ac)
+Forked from [https://github.com/huyvnphan/PyTorch_CIFAR10](https://github.com/huyvnphan/PyTorch_CIFAR10)
+
+
 # PyTorch models trained on CIFAR-10 dataset
 - I modified [TorchVision](https://pytorch.org/docs/stable/torchvision/models.html) official implementation of popular CNN models, and trained those on CIFAR-10 dataset.
 - I changed *number of class, filter size, stride, and padding* in the the original code so that it works with CIFAR-10.
