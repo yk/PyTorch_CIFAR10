@@ -35,10 +35,14 @@ def main(hparams):
     lr_logger = LearningRateLogger()
     logger = TensorBoardLogger("logs", name=hparams.classifier)
     trainer = Trainer(callbacks=[lr_logger], gpus=hparams.gpus, max_epochs=hparams.max_epochs,
-                      deterministic=True, early_stop_callback=False, logger=logger, checkpoint_callback=False)
-    trainer.fit(classifier)
+                      deterministic=True, early_stop_callback=False, logger=logger, checkpoint_callback=False, fast_dev_run=hparams.debug)
+    if not hparams.eval:
+        trainer.fit(classifier)
+    else:
+        trainer.test(classifier)
     if hparams.save_model:
-        th.save(classifier.teacher_model.state_dict(), 'logs/{}.pt'.format(hparams.classifier))
+        model = classifier.student_models[0] if hparams.num_students else classifier.teacher_model
+        th.save(model.state_dict(), 'logs/{}.pt'.format(hparams.classifier))
     
 if __name__ == '__main__':
     parser = ArgumentParser()
@@ -52,6 +56,12 @@ if __name__ == '__main__':
     parser.add_argument('--num_students', type=int, default=5)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--softmax_before_mean', type=int, default=0)
+    parser.add_argument('--argmax_label', type=int, default=0)
     parser.add_argument('--save_model', type=int, default=0)
+    parser.add_argument('--debug', type=int, default=0)
+    parser.add_argument('--eval', type=int, default=0)
+    parser.add_argument('--num_eval_students', type=int, default=0)
+    parser.add_argument('--num_eval_teachers', type=int, default=0)
+    parser.add_argument('--noise_input', type=int, default=0)
     args = parser.parse_args()
     main(args)

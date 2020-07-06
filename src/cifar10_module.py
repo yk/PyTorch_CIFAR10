@@ -6,6 +6,7 @@ import torchvision.transforms as transforms
 from torchvision.datasets import CIFAR10
 from torch.utils.data import DataLoader
 from cifar10_models import *
+from pathlib import Path
 
 def get_classifier(classifier, pretrained):
     if classifier == 'vgg11_bn':
@@ -47,18 +48,37 @@ class CIFAR10_Module(pl.LightningModule):
         self.train_size = len(self.train_dataloader().dataset)
         self.val_size = len(self.val_dataloader().dataset)
 
+        self.criterion = th.nn.CrossEntropyLoss()
         self.teacher_model = get_classifier(hparams.classifier, pretrained=False)
-        if hparams.num_students:
-            # models_path = os.path.expanduser('~/models/cifar10/cifar10_models/state_dicts')
-            models_path = os.path.expanduser('~/models/selfens/teachers')
-            load_fn =os.path.join(models_path,'{}.pt'.format(hparams.classifier) )
-            state_dict = torch.load(load_fn, map_location='cpu')
-            self.teacher_model.load_state_dict(state_dict)
-            self.student_models = th.nn.ModuleList([
-                get_classifier(hparams.classifier, pretrained=False) for _ in range(hparams.num_students)
-                ])
+        if not hparams.eval:
+            if hparams.num_students:
+                # models_path = os.path.expanduser('~/models/cifar10/cifar10_models/state_dicts')
+                models_path = os.path.expanduser('~/models/selfens/teachers')
+                load_fn =os.path.join(models_path,'{}.pt'.format(hparams.classifier) )
+                state_dict = torch.load(load_fn, map_location='cpu')
+                self.teacher_model.load_state_dict(state_dict)
+                self.student_models = th.nn.ModuleList([
+                    get_classifier(hparams.classifier, pretrained=False) for _ in range(hparams.num_students)
+                    ])
         else:
-            self.criterion = th.nn.CrossEntropyLoss()
+            students, teachers = [], []
+            addendum = '' if hparams.max_epochs == 100 else '_250'
+            for path, lst, num in (
+                    (Path('~/models/selfens/students2'+addendum).expanduser(), students, hparams.num_eval_students),
+                    (Path('~/models/selfens/teachers2'+addendum).expanduser(), teachers, hparams.num_eval_teachers),
+                    ):
+                for cmdlog in path.rglob('logs/cmdlog.txt'):
+                    params = dict(t[2:].split('=') for t in cmdlog.read_text().split() if t.startswith('--'))
+                    if all(str(getattr(hparams, p)) == params[p] for p in ('classifier', 'max_epochs')):
+                        lst.append((cmdlog, params))
+                lst.sort(key=lambda x: int(x[1]['seed']))
+                while len(lst) > num:
+                    lst.pop()
+                if len(lst) != num:
+                    raise ValueError('not enough things to load')
+            self._state_dicts = [torch.load(str(p.parent / f'{hparams.classifier}.pt'), map_location='cpu') for p, _ in students + teachers]
+            if not self._state_dicts:
+                raise ValueError('Must have at least one teacher or student')
 
     def _loss(self, student_logits, teacher_probs):
         student_log_probs = th.nn.functional.log_softmax(student_logits, -1)
@@ -75,7 +95,10 @@ class CIFAR10_Module(pl.LightningModule):
             losses = []
             for student in self.student_models:
                 student_logits = student(images)
-                student_loss = self._loss(student_logits, teacher_predictions).mean()
+                if self.hparams.argmax_label:
+                    student_loss = self.criterion(student_logits, teacher_predictions.argmax(-1))
+                else:
+                    student_loss = self._loss(student_logits, teacher_predictions).mean()
                 logits.append(student_logits)
                 losses.append(student_loss)
             loss = sum(losses)
@@ -94,6 +117,10 @@ class CIFAR10_Module(pl.LightningModule):
         return loss, accuracy, teacher_accuracy
     
     def training_step(self, batch, batch_nb):
+        if self.hparams.noise_input:
+            images, labels = batch
+            noise = torch.randn_like(images) * images.std() + images.mean()
+            batch = noise, labels
         loss, accuracy, teacher_accuracy = self.forward(batch)
         logs = {'loss/train': loss, 'accuracy/train': accuracy, 'teacher_accuracy/train': teacher_accuracy}
         return {'loss': loss, 'log': logs}
@@ -116,15 +143,25 @@ class CIFAR10_Module(pl.LightningModule):
         return {'val_loss': loss, 'log': logs}
     
     def test_step(self, batch, batch_nb):
-        return self.validation_step(batch, batch_nb)
+        images, labels = batch
+        logits = []
+        for sd in self._state_dicts:
+            self.teacher_model.load_state_dict(sd)
+            logits.append(self.teacher_model(images))
+        logits = sum(logits) / len(logits)
+        loss = self.criterion(logits, labels) * images.size(0)
+        acc = (logits.argmax(-1) == labels).float().mean() * images.size(0)
+        logs = {'loss/val': loss, 'accuracy/val': acc}
+        return logs
     
     def test_epoch_end(self, outputs):
-        accuracy = self.validation_epoch_end(outputs)['log']['accuracy/val']
-        accuracy = round((100 * accuracy).item(), 2)
-        return {'progress_bar': {'Accuracy': accuracy}}
+        loss = torch.stack([x['loss/val'] for x in outputs]).sum() / self.val_size
+        accuracy = torch.stack([x['accuracy/val'] for x in outputs]).sum() / self.val_size
+        logs = {'loss/val': loss, 'accuracy/val': accuracy}
+        return {'log': logs}
         
     def configure_optimizers(self):
-        parameters = self.student_models.parameters() if self.hparams.num_students else self.teacher_model.parameters()
+        parameters = self.student_models.parameters() if (self.hparams.num_students and not self.hparams.eval) else self.teacher_model.parameters()
         optimizer = torch.optim.SGD(parameters, lr=self.hparams.learning_rate,
                                     weight_decay=self.hparams.weight_decay, momentum=0.9, nesterov=True)
             
